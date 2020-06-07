@@ -13,6 +13,9 @@ import (
 	"context"
 	"cloud.google.com/go/storage"
 	"io"
+	"github.com/auth0/go-jwt-middleware"
+        "github.com/dgrijalva/jwt-go"
+        "github.com/gorilla/mux"
 )
 
 type Location struct{
@@ -31,9 +34,11 @@ const(
 	INDEX ="around"
 	TYPE  ="post"
 	DISTANCE="200km"
-	ES_URL ="http://35.225.98.56:9200/"
+	ES_URL ="http://34.68.168.112:9200/"
 	BUCKET_NAME="post-image-279107"
 )
+
+var mySigningKey = []byte("secret")
 
 func main(){
 // Create a client
@@ -68,23 +73,39 @@ func main(){
 		}
 	}
 
-	fmt.Println("started-service")
-	http.HandleFunc("/post",handlerPost)
-	http.HandleFunc("/search",handlerSearch)
-	log.Fatal(http.ListenAndServe(":8080",nil))
+	fmt.Println("started service successfully")
+	r := mux.NewRouter()
+
+        var jwtMiddleware = jwtmiddleware.New(jwtmiddleware.Options{
+             ValidationKeyGetter: func(token *jwt.Token) (interface{}, error) {
+                    return mySigningKey, nil
+             },
+             SigningMethod: jwt.SigningMethodHS256,
+        })
+
+        r.Handle("/post", jwtMiddleware.Handler(http.HandlerFunc(handlerPost))).Methods("POST")
+        r.Handle("/search", jwtMiddleware.Handler(http.HandlerFunc(handlerSearch))).Methods("GET")
+        r.Handle("/login", http.HandlerFunc(loginHandler)).Methods("POST")
+        r.Handle("/signup", http.HandlerFunc(signupHandler)).Methods("POST")
+
+        http.Handle("/", r)
+        log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func handlerPost(w http.ResponseWriter, r *http.Request){
 	w.Header().Set("Content-Type","application/json")
 	w.Header().Set("Access-Control-Allow-Origin","*")
 	w.Header().Set("Access-Control-Allow-Headers","Content-Type,Authorization")
-	r.ParseMutipartForm(32<<20)
+	user :=r.Context().Value("user")
+	claims:=user.(*jwt.Token).Claims
+	username:=claims.(jwt.MapClaims)["username"]
+	r.ParseMultipartForm(32<<20)
 
 	fmt.Printf("Received one post request %s\n",r.FormValue("message"))
 	lat,_:=strconv.ParseFloat(r.FormValue("lat"),64)
 	lon,_:=strconv.ParseFloat(r.FormValue("lon"),64)
 	p:=&Post{
-		User:"1111",
+		User: username.(string),
 		Message:r.FormValue("message"),
 		Location:Location{
 			Lat:lat,
@@ -104,7 +125,7 @@ func handlerPost(w http.ResponseWriter, r *http.Request){
 
 	ctx:=context.Background()
 
-	_,attrs,err=:=saveToGCS(ctx,file,BUCKET_NAME,id)
+	_,attrs,err:=saveToGCS(ctx,file,BUCKET_NAME,id)
 	if err!=nil{
 		http.Error(w,"GCS is not setup",http.StatusInternalServerError)
 		fmt.Printf("GCS is not setup %v\n",err)
@@ -130,7 +151,7 @@ func saveToGCS(ctx context.Context,r io.Reader,bucketName,name string)(*storage.
 
 	obj:=bucket.Object(name)
 	w:=obj.NewWriter(ctx)
-	if_,err:=io.Copy(w,r);err!=nil{
+	if _,err:=io.Copy(w,r);err!=nil{
 		return nil,nil,err
 	}
 	if err:=w.Close();err!=nil{
